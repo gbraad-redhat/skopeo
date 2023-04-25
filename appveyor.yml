@@ -1,0 +1,63 @@
+version: 1.0.{build}
+image: Visual Studio 2019
+
+environment:
+  APPVEYOR_RDP_PASSWORD: fordebug!14
+
+init:
+  - ps: iex ((new-object net.webclient).DownloadString('https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1'))
+install:
+- ps: |
+    $path = [Environment]::GetEnvironmentVariable("path", "machine")
+    $newPath = ($path.Split(';') | Where-Object { $_ -eq 'C:\ProgramData\chocolatey\bin' }) -join ';'
+    [Environment]::SetEnvironmentVariable("path", $newPath, "machine")
+    choco install gpg4win --no-progress
+    [Environment]::SetEnvironmentVariable("path", $path, "machine")
+build_script:
+# APPVEYOR_BUILD_FOLDER=/c/projects/skopeo
+# Here we need edit Makefile and comment line 11, starts with GPGME_ENV, in order to be able to set CGO variables
+- sed -i -e '11s/^GPGME_ENV/#GPGME_ENV/' Makefile
+- go version
+
+- |-
+  set GPG_INSTALL_DIR=C:\Program Files (x86)\Gpg4win
+  set GPG_INSTALL_DLL=%GPG_INSTALL_DIR%\bin_64
+  set DIST_DIR=dist
+  set GPG_DLL=gpg-dll
+
+- ln -s "%GPG_INSTALL_DIR%" ./
+#Next - we will use dll files for linking
+#x86_64 located at /c/projects/gpg4win/bin_64
+#dll names should be changed for ld: libassuan6-0.dll -> libassuan.dll 
+#Create symlinks for libraries, so linker can found them
+     
+- ps: |
+    New-Item -Path $env:DIST_DIR -ItemType Directory
+    New-Item -Path $env:GPG_DLL -ItemType Directory
+
+    Get-ChildItem $env:GPG_INSTALL_DIR\bin_64 | `
+      Where-Object { $_.Name -match '\d?-[^-]+?(\.dll)$' } | `
+      % {
+        Copy-Item -Path $env:GPG_INSTALL_DLL\$_ -Destination $env:DIST_DIR
+        
+        Copy-Item -Path $env:GPG_INSTALL_DLL\$_ -Destination $env:GPG_DLL -PassThru | `
+          Rename-Item -NewName { $_.Name -replace '\d?-[^-]+?(\.dll)$','.dll' }
+      }
+
+    Copy-Item $env:GPG_INSTALL_DLL\gpgme-w32spawn.exe $env:DIST_DIR
+
+- |-
+    set PATH=C:\msys64\bin;C:\msys64\mingw64\bin;%PATH%
+    set CGO_ENABLED=1
+    set GOARCH=amd64
+    set MSYSTEM_CHOST=x86_64-w64-mingw32
+    set PROJ_DIR=/c/projects/%APPVEYOR_PROJECT_SLUG%
+    set CC=%MSYSTEM_CHOST%-gcc 
+    set CXX=%MSYSTEM_CHOST%-g++ 
+    set CGO_CFLAGS=-I%PROJ_DIR%/Gpg4win/include
+    set CGO_LDFLAGS=-L%PROJ_DIR%/%GPG_DLL%
+    mingw32-make.exe bin/skopeo
+    copy bin\skopeo %DIST_DIR%\skopeo.exe
+
+artifacts:
+  - path: dist
